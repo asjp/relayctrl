@@ -1,0 +1,1 @@
+{"Mappings":[{"Id":0,"Key":"{","RelayNumber":7,"Toggle":false},{"Id":1,"Key":"a","RelayNumber":1,"Toggle":false},{"Id":2,"Key":"b","RelayNumber":2,"Toggle":false}],"Api":"192.168.1.100","Password":"admin","Timeout":250000000,"NumRelays":16}
