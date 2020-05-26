@@ -22,11 +22,14 @@ import (
 	"time"
 )
 
+type Modifiers map[types.VKCode]bool
+
 type Key struct {
 	Id          int
-	Key         string
+	Key         types.VKCode
 	RelayNumber int
 	Toggle      bool
+	Modifiers   Modifiers
 }
 
 type Config struct {
@@ -44,6 +47,7 @@ var (
 	configByKeyCode map[types.VKCode][]Key
 	lastErr         error
 	trying			bool
+	modifiers       Modifiers
 )
 
 type RelayState struct {
@@ -75,6 +79,7 @@ table { empty-cells: hide }
 .ok { border: 2px solid green }
 .trying { border: 2px solid yellow }
 .error { border: 2px solid red }
+input[type="checkbox"] { margin-left: 8px }
 `
 
 func selectTemplate() string {
@@ -84,6 +89,25 @@ func selectTemplate() string {
 		sb.WriteString(fmt.Sprintf(`<option value="%d"{{if eq .RelayNumber %d}} selected="1"{{end}}>%d</option>`, i, i, i))
 	}
 	sb.WriteString("</select>")
+	return sb.String()
+}
+
+func selectKeyTemplate() string {
+	var sb strings.Builder
+	sb.WriteString(`<select name="key{{.Id}}">`)
+	for i := 1; i <= 254; i++ {
+		sb.WriteString(fmt.Sprintf(`<option value="%d"{{if eq .Key %d}} selected="1"{{end}}>%s</option>`, i, i, types.VKCode(i)))
+	}
+	sb.WriteString("</select>")
+	return sb.String()
+}
+
+func modifiersTemplate() string {
+	var sb strings.Builder
+	sb.WriteString(`<input type="checkbox" value="1" name="lshift{{.Id}}"{{if index .Modifiers 160}} checked="1"{{end}}/><label for="lshift{{.Id}}">L-Shift</label>`)
+	sb.WriteString(`<input type="checkbox" value="1" name="rshift{{.Id}}"{{if index .Modifiers 161}} checked="1"{{end}}/><label for="rshift{{.Id}}">R-Shift</label>`)
+	sb.WriteString(`<input type="checkbox" value="1" name="lctrl{{.Id}}"{{if index .Modifiers 162}} checked="1"{{end}}/><label for="lctrl{{.Id}}">L-Ctrl</label>`)
+	sb.WriteString(`<input type="checkbox" value="1" name="rctrl{{.Id}}"{{if index .Modifiers 163}} checked="1"{{end}}/><label for="rctrl{{.Id}}">R-Ctrl</label>`)
 	return sb.String()
 }
 
@@ -135,8 +159,8 @@ func getConfig(saved bool) string {
 	if saved {
 		sb.WriteString(`<div style="display: inline-block" class="ok">Saved</div>`)
 	}
-	sb.WriteString(`</div><table><tr><th>Key Mapping</th><th>Relay #</th><th>Toggle Mode</th><th>Delete</th></tr>`)
-	t, err = template.New("foo").Parse(`<tr><td><input maxlength="1" type="text" name="key{{.Id}}" value="{{.Key}}" /></td><td>` + selectTemplate() +
+	sb.WriteString(`</div><table><tr><th>Key Mapping</th><th>Modifiers</th><th>Relay #</th><th>Toggle Mode</th><th>Delete</th></tr>`)
+	t, err = template.New("foo").Parse(`<tr><td>` + selectKeyTemplate() + `</td><td>` + modifiersTemplate() + `</td><td>` + selectTemplate() +
 		`</td><td><input type="checkbox" name="toggle{{.Id}}" {{if .Toggle}}checked="1" {{end}}/></td><td><input type="button" value="X" onclick="deleteConfig({{.Id}})" /></td></tr>`)
 	if err != nil {
 		return err.Error()
@@ -165,9 +189,18 @@ func maxKeyId() int {
 	return i
 }
 
+func readModifiers(v url.Values, id int) Modifiers {
+	m := newModifiers()
+	m[types.VK_LSHIFT] = v.Get(fmt.Sprintf("lshift%d", id)) == "1"
+	m[types.VK_RSHIFT] = v.Get(fmt.Sprintf("rshift%d", id)) == "1"
+	m[types.VK_LCONTROL] = v.Get(fmt.Sprintf("lctrl%d", id)) == "1"
+	m[types.VK_RCONTROL] = v.Get(fmt.Sprintf("rctrl%d", id)) == "1"
+	return m
+}
+
 func updateConfig(v url.Values) error {
 	if v.Get("add") != "" {
-		config.Mappings = append(config.Mappings, Key{Id: maxKeyId() + 1})
+		config.Mappings = append(config.Mappings, Key{Id: maxKeyId() + 1, Modifiers: newModifiers()})
 	} else if v.Get("delete") != "" {
 		id_to_delete, _ := strconv.Atoi(v.Get("id"))
 		for i, k := range config.Mappings {
@@ -180,11 +213,14 @@ func updateConfig(v url.Values) error {
 		config.Api = v.Get("api")
 		for i, k := range config.Mappings {
 			rn, _ := strconv.Atoi(v.Get(fmt.Sprintf("relay%d", k.Id)))
+			code, _ := strconv.Atoi(v.Get(fmt.Sprintf("key%d", k.Id)))
+			modifiers := readModifiers(v, k.Id)
 			config.Mappings[i] = Key{
 				Id:          k.Id,
-				Key:         v.Get(fmt.Sprintf("key%d", k.Id)),
+				Key:         types.VKCode(code),
 				RelayNumber: rn,
 				Toggle:      v.Get(fmt.Sprintf("toggle%d", k.Id)) != "",
+				Modifiers:	 modifiers,
 			}
 		}
 		updateConfigByKeyCode()
@@ -218,34 +254,35 @@ func updateConfigByKeyCode() {
 	m := make(map[types.VKCode][]Key, 0)
 	for _, c := range config.Mappings {
 		//fmt.Println(c)
-		if c.Key == "" {
-			continue
-		}
-		code := types.VKCode(strings.ToUpper(c.Key)[0])
-		_, ok := m[code]
+		_, ok := m[c.Key]
 		if !ok {
-			m[code] = make([]Key, 0)
+			m[c.Key] = make([]Key, 0)
 		}
-		m[code] = append(m[code], c)
+		m[c.Key] = append(m[c.Key], c)
 	}
 	configByKeyCode = m
 }
 
 func setRelay(key Key, flags uint32) {
 	var on int
+	for i, m := range modifiers {
+		if key.Modifiers[i] != m {
+			return
+		}
+	}
 	if key.Toggle {
-		if flags == 0 {
+		if flags & 128 == 0 {
 			if states[key.RelayNumber] == 0 {
 				on = 1
 			}
 		} else {
 			return
 		}
-	} else if flags == 0 {
+	} else if flags & 128 == 0 {
 		on = 1
 	}
 	if on != states[key.RelayNumber] {
-		fmt.Printf("%+v %d\n", key, on)
+		//fmt.Printf("%+v %d\n", key, on)
 		req, _ := http.NewRequest("GET",
 			fmt.Sprintf("http://%v/current_state.json?pw=%v&Relay%d=%d", config.Api, config.Password, key.RelayNumber, on),
 			nil)
@@ -321,7 +358,18 @@ func saveConfig() error {
 	return nil
 }
 
+func newModifiers() Modifiers {
+	m := make(Modifiers, 4)
+	m[types.VK_LSHIFT] = false
+	m[types.VK_RSHIFT] = false
+	m[types.VK_LCONTROL] = false
+	m[types.VK_RCONTROL] = false
+	return m
+}
+
 func main() {
+	modifiers = newModifiers()
+	
 	// default config
 	config.Api = "192.168.1.100"
 	config.Password = "admin"
@@ -371,6 +419,10 @@ func main() {
 		case k := <-keyboardChan:
 			//fmt.Printf("%+v\n", k)
 			if k.VKCode != lastkey || k.Flags != lastflags {
+				if _, ok := modifiers[k.VKCode]; ok {
+				    modifiers[k.VKCode] = (k.Flags & 128 == 0)
+					//fmt.Printf("%+v\n", modifiers)
+				}
 				if relays, ok := configByKeyCode[k.VKCode]; ok {
 					for _, key := range relays {
 						go setRelay(key, k.Flags)
